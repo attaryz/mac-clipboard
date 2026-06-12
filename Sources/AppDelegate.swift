@@ -1,11 +1,13 @@
 import Cocoa
 import SwiftUI
+import Carbon
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     var popover: NSPopover!
     var clipboardManager: ClipboardManager!
     var eventMonitor: Any?
+    var hotKeyID: EventHotKeyRef?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -31,6 +33,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         setupGlobalHotkey()
         setupClickOutsideMonitor()
+        setupLocalHotkey()
     }
     
     @objc func togglePopover() {
@@ -65,6 +68,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     self.togglePopover()
                 }
             }
+        }
+    }
+    
+    func setupLocalHotkey() {
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.modifierFlags.contains(.command) &&
+               event.modifierFlags.contains(.shift) &&
+               event.keyCode == 9 {
+                DispatchQueue.main.async {
+                    self.togglePopover()
+                }
+                return nil
+            }
+            return event
         }
     }
     

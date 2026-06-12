@@ -1,13 +1,14 @@
 import SwiftUI
 
 struct ClipboardHistoryView: View {
-    @StateObject private var clipboardManager = ClipboardManager()
+    @EnvironmentObject var clipboardManager: ClipboardManager
     @State private var searchText = ""
     @State private var selectedItemId: UUID?
     @State private var showSettings = false
     @State private var showToast = false
     @State private var toastMessage = ""
     @FocusState private var isSearchFocused: Bool
+    @State private var allFlatItems: [ClipboardManager.ClipboardItem] = []
     
     var filteredGroups: [(String, [ClipboardManager.ClipboardItem])] {
         if searchText.isEmpty {
@@ -42,6 +43,13 @@ struct ClipboardHistoryView: View {
         .background(Color(NSColor.controlBackgroundColor))
         .onAppear {
             isSearchFocused = true
+            updateFlatItems()
+        }
+        .onChange(of: clipboardManager.clipboardItems) { _ in
+            updateFlatItems()
+        }
+        .onChange(of: clipboardManager.groupMode) { _ in
+            updateFlatItems()
         }
         .sheet(isPresented: $showSettings) {
             SettingsView(clipboardManager: clipboardManager)
@@ -100,33 +108,35 @@ struct ClipboardHistoryView: View {
     }
     
     private func navigateItems(direction: NavigationDirection) {
-        let allItems = filteredGroups.flatMap { $0.1 }
-        guard !allItems.isEmpty else { return }
+        guard !allFlatItems.isEmpty else { return }
         
         if let currentId = selectedItemId,
-           let currentIndex = allItems.firstIndex(where: { $0.id == currentId }) {
+           let currentIndex = allFlatItems.firstIndex(where: { $0.id == currentId }) {
             let newIndex: Int
             switch direction {
             case .down:
-                newIndex = min(currentIndex + 1, allItems.count - 1)
+                newIndex = min(currentIndex + 1, allFlatItems.count - 1)
             case .up:
                 newIndex = max(currentIndex - 1, 0)
             }
-            selectedItemId = allItems[newIndex].id
+            selectedItemId = allFlatItems[newIndex].id
         } else {
-            selectedItemId = allItems.first?.id
+            selectedItemId = allFlatItems.first?.id
         }
     }
     
     private func selectItemAtIndex(_ index: Int) {
-        let allItems = filteredGroups.flatMap { $0.1 }
-        guard index >= 0 && index < allItems.count else { return }
-        selectedItemId = allItems[index].id
-        copyItem(allItems[index])
+        guard index >= 0 && index < allFlatItems.count else { return }
+        selectedItemId = allFlatItems[index].id
+        copyItem(allFlatItems[index])
     }
     
     private func findItem(by id: UUID) -> ClipboardManager.ClipboardItem? {
-        return filteredGroups.flatMap { $0.1 }.first { $0.id == id }
+        return allFlatItems.first { $0.id == id }
+    }
+    
+    private func updateFlatItems() {
+        allFlatItems = filteredGroups.flatMap { $0.1 }
     }
     
     private func closePopover() {
@@ -433,7 +443,7 @@ struct ClipboardItemRow: View {
                 )
             
             VStack(alignment: .leading, spacing: 3) {
-                Text(item.content)
+                Text(item.content.count > 10000 ? String(item.content.prefix(10000)) + "..." : item.content)
                     .lineLimit(showFullText ? nil : 2)
                     .font(.system(size: 13))
                     .truncationMode(.tail)
@@ -574,7 +584,7 @@ struct TextPreviewPopover: View {
     
     var body: some View {
         ScrollView {
-            Text(content)
+            Text(content.count > 10000 ? String(content.prefix(10000)) + "..." : content)
                 .font(.system(size: 12, design: .monospaced))
                 .padding()
                 .frame(maxWidth: .infinity, alignment: .leading)

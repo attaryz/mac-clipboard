@@ -7,10 +7,12 @@ class ClipboardManager: ObservableObject {
     @Published var groupMode: GroupMode = .time
     @Published var autoPasteEnabled: Bool = true
     @Published var maxItemsLimit: Int = 50
+    @Published var groupedItemsCache: [(String, [ClipboardItem])] = []
     
     private var lastChangeCount: Int = 0
-    private var timer: Timer?
+    private var timer: DispatchSourceTimer?
     private var cancellables = Set<AnyCancellable>()
+    private var monitorQueue = DispatchQueue(label: "clipboard.monitor", qos: .utility)
     
     enum GroupMode: String, Codable, CaseIterable {
         case time = "Time"
@@ -26,7 +28,7 @@ class ClipboardManager: ObservableObject {
         }
     }
     
-    struct ClipboardItem: Identifiable, Codable {
+    struct ClipboardItem: Identifiable, Codable, Equatable {
         let id: UUID
         let content: String
         let timestamp: Date
@@ -47,8 +49,9 @@ class ClipboardManager: ObservableObject {
             if content.hasPrefix("http://") || content.hasPrefix("https://") {
                 return .link
             }
+            let searchScope = String(content.prefix(1000))
             let codePatterns = ["func ", "var ", "let ", "const ", "def ", "class ", "import ", "#include", "{}", "()", ";\n", "=>", "->"]
-            if codePatterns.contains(where: { content.contains($0) }) {
+            if codePatterns.contains(where: { searchScope.contains($0) }) {
                 return .code
             }
             return .text
@@ -64,15 +67,19 @@ class ClipboardManager: ObservableObject {
     }
     
     var groupedItems: [(String, [ClipboardItem])] {
+        groupedItemsCache
+    }
+    
+    private func updateGroupedItemsCache() {
         let itemsToGroup = clipboardItems
         
         switch groupMode {
         case .time:
-            return groupByTime(itemsToGroup)
+            groupedItemsCache = groupByTime(itemsToGroup)
         case .type:
-            return groupByType(itemsToGroup)
+            groupedItemsCache = groupByType(itemsToGroup)
         case .source:
-            return groupBySource(itemsToGroup)
+            groupedItemsCache = groupBySource(itemsToGroup)
         }
     }
     
@@ -130,13 +137,15 @@ class ClipboardManager: ObservableObject {
         loadSavedItems()
         startMonitoring()
         
-        Publishers.Merge3(
+        Publishers.Merge4(
+            $clipboardItems.map { _ in () }.eraseToAnyPublisher(),
             $groupMode.map { _ in () }.eraseToAnyPublisher(),
             $autoPasteEnabled.map { _ in () }.eraseToAnyPublisher(),
             $maxItemsLimit.map { _ in () }.eraseToAnyPublisher()
         )
-        .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+        .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
         .sink { [weak self] in
+            self?.updateGroupedItemsCache()
             self?.saveSettings()
         }
         .store(in: &cancellables)
@@ -144,26 +153,35 @@ class ClipboardManager: ObservableObject {
     
     func startMonitoring() {
         lastChangeCount = NSPasteboard.general.changeCount
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
-            self.checkForChanges()
+        
+        timer = DispatchSource.makeTimerSource(queue: monitorQueue)
+        timer?.schedule(deadline: .now(), repeating: 0.5)
+        timer?.setEventHandler { [weak self] in
+            self?.checkForChanges()
         }
+        timer?.resume()
     }
     
     func stopMonitoring() {
-        timer?.invalidate()
+        timer?.cancel()
         timer = nil
     }
     
     private func checkForChanges() {
         let pasteboard = NSPasteboard.general
-        guard pasteboard.changeCount != lastChangeCount else { return }
+        let currentChangeCount = pasteboard.changeCount
+        guard currentChangeCount != lastChangeCount else { return }
         
-        lastChangeCount = pasteboard.changeCount
+        lastChangeCount = currentChangeCount
         
-        if let string = pasteboard.string(forType: .string) {
-            addItem(content: string, type: .text)
-        } else if let url = pasteboard.string(forType: .fileURL) {
-            addItem(content: url, type: .file)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            
+            if let string = pasteboard.string(forType: .string) {
+                self.addItem(content: string, type: .text)
+            } else if let url = pasteboard.string(forType: .fileURL) {
+                self.addItem(content: url, type: .file)
+            }
         }
     }
     
@@ -190,11 +208,9 @@ class ClipboardManager: ObservableObject {
             sourceApp: sourceApp
         )
         
-        DispatchQueue.main.async {
-            self.clipboardItems.insert(item, at: 0)
-            self.enforceItemLimit()
-            self.saveItems()
-        }
+        clipboardItems.insert(item, at: 0)
+        enforceItemLimit()
+        saveItems()
     }
     
     private func enforceItemLimit() {
@@ -266,6 +282,8 @@ class ClipboardManager: ObservableObject {
         return appFolder.appendingPathComponent("settings.json")
     }
     
+    private var saveQueue = DispatchQueue(label: "clipboard.save", qos: .utility)
+    
     private func saveSettings() {
         let settings = Settings(
             groupMode: groupMode,
@@ -273,11 +291,13 @@ class ClipboardManager: ObservableObject {
             maxItemsLimit: maxItemsLimit
         )
         
-        do {
-            let encoded = try JSONEncoder().encode(settings)
-            try encoded.write(to: settingsURL, options: .atomic)
-        } catch {
-            print("Failed to save settings: \(error)")
+        saveQueue.async {
+            do {
+                let encoded = try JSONEncoder().encode(settings)
+                try encoded.write(to: self.settingsURL, options: .atomic)
+            } catch {
+                print("Failed to save settings: \(error)")
+            }
         }
     }
     
@@ -300,11 +320,13 @@ class ClipboardManager: ObservableObject {
     }
     
     private func saveItems() {
-        do {
-            let encoded = try JSONEncoder().encode(clipboardItems)
-            try encoded.write(to: storageURL, options: .atomic)
-        } catch {
-            print("Failed to save clipboard items: \(error)")
+        saveQueue.async {
+            do {
+                let encoded = try JSONEncoder().encode(self.clipboardItems)
+                try encoded.write(to: self.storageURL, options: .atomic)
+            } catch {
+                print("Failed to save clipboard items: \(error)")
+            }
         }
     }
     
